@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Union, Callable, Tuple
 import concurrent.futures
 from functools import partial
+import multiprocessing
+import sys
 
 import cv2
 import h5py
@@ -32,15 +34,25 @@ except ImportError:
 
 try:
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-    from lerobot.common.constants import HF_LEROBOT_HOME
+    # from lerobot.common.constants import HF_LEROBOT_HOME
 except ImportError:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-    from lerobot.constants import HF_LEROBOT_HOME
+    # from lerobot.constants import HF_LEROBOT_HOME
 
 
 # 设置日志
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(processName)s:%(process)d] [%(filename)s:%(lineno)d] %(message)s",
+    handlers=[logging.StreamHandler()],
+)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+# 任务名称常量
+TASK_NAME = "Isaac-Stack-Cube-Franka-IK-Rel-Visuomotor-Cosmos-v0"
+
+logger.info("Libero RLDS/HDF5转换器初始化")
+
 
 
 class DatasetFormatDetector:
@@ -101,7 +113,7 @@ class HDF5Processor:
     def get_default_features(self, use_videos: bool = True) -> Dict[str, Dict[str, Any]]:
         """获取Libero数据集的默认特征配置"""
         image_dtype = "video" if use_videos else "image"
-        
+
         return {
             "observation.images.front": {
                 "dtype": image_dtype,
@@ -122,8 +134,8 @@ class HDF5Processor:
                 "dtype": "float32",
                 "shape": (7,),
                 "names": [f"action_{i}" for i in range(7)],
+            },
             }
-        }
     
     def process_episode(self, episode_path: Path, dataset: LeRobotDataset, task_name: str) -> bool:
         """
@@ -132,7 +144,7 @@ class HDF5Processor:
         Args:
             episode_path: episode文件路径
             dataset: LeRobot数据集
-            task_name: 任务名称
+            task_name: 任务名称（已弃用，现在使用TASK_NAME常量）
             
         Returns:
             bool: 处理是否成功
@@ -156,10 +168,11 @@ class HDF5Processor:
 
     def _process_libero_demo_format(self, file: h5py.File, dataset: LeRobotDataset, task_name: str, file_path: Optional[Path] = None) -> bool:
         """处理新的Libero demo格式：data/demo_N/..."""
+        # 注意：task_name参数已弃用，现在使用TASK_NAME常量
         data_group = file["data"]
         
-        # 尝试从文件根级别提取任务信息
-        task_str = self._extract_task_info(file, task_name, file_path)
+        # 使用常量任务名称
+        task_str = TASK_NAME
         
         # 获取所有demo
         demo_keys = [k for k in data_group.keys() if k.startswith("demo_")]
@@ -169,8 +182,8 @@ class HDF5Processor:
             demo_group = data_group[demo_key]
             logger.info(f"处理 {demo_key}")
             
-            # 尝试从demo级别提取任务信息
-            demo_task_str = self._extract_task_info(demo_group, task_str, file_path)
+            # 使用常量任务名称
+            demo_task_str = TASK_NAME
             
             # 读取动作数据
             actions = np.array(demo_group["actions"])
@@ -179,17 +192,35 @@ class HDF5Processor:
             obs_group = demo_group["obs"]
             
             # 读取关节状态 - 作为observation.state
-            joint_states = np.array(obs_group["joint_states"])
+            # 尝试多种可能的关节状态字段名
+            if "joint_states" in obs_group:
+                joint_states = np.array(obs_group["joint_states"])
+            elif "joint_pos" in obs_group:
+                joint_states = np.array(obs_group["joint_pos"])
+            else:
+                raise KeyError("未找到关节状态数据 (joint_states 或 joint_pos)")
             
-            # 将7维状态扩展为8维以匹配RLDS格式
+            # 调整状态维度以匹配RLDS格式
             if joint_states.shape[-1] == 7:
                 # 添加一个额外的维度（例如夹爪状态，设为0）
                 gripper_state = np.zeros((joint_states.shape[0], 1), dtype=joint_states.dtype)
                 joint_states = np.concatenate([joint_states, gripper_state], axis=-1)
+            elif joint_states.shape[-1] == 9:
+                # 如果是9维，取前7维作为关节位置，后2维可能是夹爪状态
+                # 我们取前7维，然后添加一个额外的维度
+                joint_states = joint_states[:, :7]
+                gripper_state = np.zeros((joint_states.shape[0], 1), dtype=joint_states.dtype)
+                joint_states = np.concatenate([joint_states, gripper_state], axis=-1)
             
-            # 读取图像数据
-            agentview_rgb = np.array(obs_group["agentview_rgb"])  # 前视图像
-            eye_in_hand_rgb = np.array(obs_group["eye_in_hand_rgb"])  # 腕部图像
+            # 读取图像数据 - 尝试多种可能的字段名
+            if "agentview_rgb" in obs_group and "eye_in_hand_rgb" in obs_group:
+                agentview_rgb = np.array(obs_group["agentview_rgb"])  # 前视图像
+                eye_in_hand_rgb = np.array(obs_group["eye_in_hand_rgb"])  # 腕部图像
+            elif "table_cam" in obs_group and "wrist_cam" in obs_group:
+                agentview_rgb = np.array(obs_group["table_cam"])  # 前视图像
+                eye_in_hand_rgb = np.array(obs_group["wrist_cam"])  # 腕部图像
+            else:
+                raise KeyError("未找到图像数据 (agentview_rgb/eye_in_hand_rgb 或 table_cam/wrist_cam)")
             
             # 确保所有数组长度一致
             num_frames = min(len(actions), len(joint_states), len(agentview_rgb), len(eye_in_hand_rgb))
@@ -210,94 +241,27 @@ class HDF5Processor:
                     "observation.state": joint_states[i].astype(np.float32),
                     "observation.images.front": front_img,
                     "observation.images.wrist": wrist_img,
+                    "task": demo_task_str,
                 }
                 
                 # 添加帧到数据集 - 修复API调用
-                dataset.add_frame(frame_data, task=demo_task_str)
+                logger.debug(f"Adding frame with keys: {frame_data.keys()}")
+                dataset.add_frame(frame_data)
             
             # 每个demo保存为一个episode
             dataset.save_episode()
         
         return True
 
-    def _extract_task_info(self, group: h5py.Group, default_task: str, file_path: Optional[Path] = None) -> str:
-        """从HDF5组中提取任务信息"""
-        # 尝试多种可能的任务信息字段
-        task_fields = [
-            "language_instruction", "task_description", "task", "description",
-            "instruction", "goal", "task_name", "task_info"
-        ]
-        
-        for field in task_fields:
-            if field in group:
-                try:
-                    task_data = group[field]
-                    if hasattr(task_data, 'asstr'):
-                        # 处理字符串数组
-                        task_str = task_data.asstr()[()]
-                    elif isinstance(task_data, (bytes, str)):
-                        # 处理字节或字符串
-                        task_str = task_data.decode() if isinstance(task_data, bytes) else task_data
-                    else:
-                        # 尝试转换为字符串
-                        task_str = str(task_data[()])
-                    
-                    if task_str and task_str.strip():
-                        logger.info(f"从字段 '{field}' 提取到任务: {task_str}")
-                        return task_str.strip()
-                except Exception as e:
-                    logger.debug(f"提取字段 '{field}' 失败: {e}")
-                    continue
-        
-        # 如果没有找到任务信息，尝试从文件名提取
-        if file_path is not None:
-            task_str = self._extract_task_from_filename(file_path)
-            if task_str:
-                logger.info(f"从文件名提取到任务: {task_str}")
-                return task_str
-        
-        # 如果都没有找到任务信息，返回默认值
-        return default_task
-    
-    def _extract_task_from_filename(self, file_path: Path) -> Optional[str]:
-        """从文件名中提取任务描述"""
-        try:
-            # 获取文件名（不含扩展名）
-            filename = file_path.stem
-            
-            # 常见的后缀需要移除
-            suffixes_to_remove = [
-                '_demo', '_trajectory', '_episode', '_data', '_hdf5',
-                'demo', 'trajectory', 'episode', 'data', 'hdf5'
-            ]
-            
-            # 移除后缀
-            task_name = filename
-            for suffix in suffixes_to_remove:
-                if task_name.endswith(suffix):
-                    task_name = task_name[:-len(suffix)]
-                    break
-            
-            # 将下划线替换为空格，使其更易读
-            task_name = task_name.replace('_', ' ')
-            
-            # 如果任务名称太短，可能不是有效的任务描述
-            if len(task_name.strip()) < 5:
-                return None
-            
-            return task_name.strip()
-            
-        except Exception as e:
-            logger.debug(f"从文件名提取任务失败: {e}")
-            return None
 
     def _extract_libero_demo_frames(self, file: h5py.File, task_name: str, file_path: Optional[Path] = None) -> List[List[Dict]]:
         """提取Libero demo格式的帧数据（用于多线程处理）- 返回按demo分组的数据"""
+        # 注意：task_name参数已弃用，现在使用TASK_NAME常量
         demos_frames = []
         data_group = file["data"]
         
-        # 尝试从文件根级别提取任务信息
-        task_str = self._extract_task_info(file, task_name, file_path)
+        # 使用常量任务名称
+        task_str = TASK_NAME
         
         # 获取所有demo
         demo_keys = [k for k in data_group.keys() if k.startswith("demo_")]
@@ -307,8 +271,8 @@ class HDF5Processor:
             demo_frames = []
             demo_group = data_group[demo_key]
             
-            # 尝试从demo级别提取任务信息
-            demo_task_str = self._extract_task_info(demo_group, task_str, file_path)
+            # 使用常量任务名称
+            demo_task_str = TASK_NAME
             
             # 读取动作数据
             actions = np.array(demo_group["actions"])
@@ -317,17 +281,35 @@ class HDF5Processor:
             obs_group = demo_group["obs"]
             
             # 读取关节状态 - 作为observation.state
-            joint_states = np.array(obs_group["joint_states"])
+            # 尝试多种可能的关节状态字段名
+            if "joint_states" in obs_group:
+                joint_states = np.array(obs_group["joint_states"])
+            elif "joint_pos" in obs_group:
+                joint_states = np.array(obs_group["joint_pos"])
+            else:
+                raise KeyError("未找到关节状态数据 (joint_states 或 joint_pos)")
             
-            # 将7维状态扩展为8维以匹配RLDS格式
+            # 调整状态维度以匹配RLDS格式
             if joint_states.shape[-1] == 7:
                 # 添加一个额外的维度（例如夹爪状态，设为0）
                 gripper_state = np.zeros((joint_states.shape[0], 1), dtype=joint_states.dtype)
                 joint_states = np.concatenate([joint_states, gripper_state], axis=-1)
+            elif joint_states.shape[-1] == 9:
+                # 如果是9维，取前7维作为关节位置，后2维可能是夹爪状态
+                # 我们取前7维，然后添加一个额外的维度
+                joint_states = joint_states[:, :7]
+                gripper_state = np.zeros((joint_states.shape[0], 1), dtype=joint_states.dtype)
+                joint_states = np.concatenate([joint_states, gripper_state], axis=-1)
             
-            # 读取图像数据
-            agentview_rgb = np.array(obs_group["agentview_rgb"])  # 前视图像
-            eye_in_hand_rgb = np.array(obs_group["eye_in_hand_rgb"])  # 腕部图像
+            # 读取图像数据 - 尝试多种可能的字段名
+            if "agentview_rgb" in obs_group and "eye_in_hand_rgb" in obs_group:
+                agentview_rgb = np.array(obs_group["agentview_rgb"])  # 前视图像
+                eye_in_hand_rgb = np.array(obs_group["eye_in_hand_rgb"])  # 腕部图像
+            elif "table_cam" in obs_group and "wrist_cam" in obs_group:
+                agentview_rgb = np.array(obs_group["table_cam"])  # 前视图像
+                eye_in_hand_rgb = np.array(obs_group["wrist_cam"])  # 腕部图像
+            else:
+                raise KeyError("未找到图像数据 (agentview_rgb/eye_in_hand_rgb 或 table_cam/wrist_cam)")
             
             # 确保所有数组长度一致
             num_frames = min(len(actions), len(joint_states), len(agentview_rgb), len(eye_in_hand_rgb))
@@ -348,7 +330,7 @@ class HDF5Processor:
                     "observation.state": joint_states[i].astype(np.float32),
                     "observation.images.front": front_img,
                     "observation.images.wrist": wrist_img,
-                    "task": demo_task_str,  # 暂时保留在字典中
+                    "task": demo_task_str,
                 }
                 demo_frames.append(frame_data)
             
@@ -358,14 +340,15 @@ class HDF5Processor:
 
     def _extract_direct_episode_frames(self, file: h5py.File, task_name: str, file_path: Optional[Path] = None) -> List[List[Dict]]:
         """提取直接episode格式的帧数据（兜底方案，用于多线程处理）- 返回按episode分组的数据"""
+        # 注意：task_name参数已弃用，现在使用TASK_NAME常量
         # 兜底方案：将整个文件作为一个episode
         episode_frames = []
         
-        # 尝试提取任务信息
-        task_str = self._extract_task_info(file, task_name, file_path)
+        # 使用常量任务名称
+        task_str = TASK_NAME
         
         # 尝试找到可能的状态数据
-        state_keys = ["joint_states", "states", "robot_states", "state"]
+        state_keys = ["joint_states", "joint_pos", "states", "robot_states", "state"]
         state_data = None
         
         for key in state_keys:
@@ -377,12 +360,19 @@ class HDF5Processor:
         if state_data is None:
             raise KeyError("未找到任何状态数据")
         
-        # 将7维状态扩展为8维以匹配RLDS格式
+        # 调整状态维度以匹配RLDS格式
         if state_data.shape[-1] == 7:
             # 添加一个额外的维度（例如夹爪状态，设为0）
             gripper_state = np.zeros((state_data.shape[0], 1), dtype=state_data.dtype)
             state_data = np.concatenate([state_data, gripper_state], axis=-1)
             logger.info(f"状态数据从7维扩展为8维: {state_data.shape}")
+        elif state_data.shape[-1] == 9:
+            # 如果是9维，取前7维作为关节位置，后2维可能是夹爪状态
+            # 我们取前7维，然后添加一个额外的维度
+            state_data = state_data[:, :7]
+            gripper_state = np.zeros((state_data.shape[0], 1), dtype=state_data.dtype)
+            state_data = np.concatenate([state_data, gripper_state], axis=-1)
+            logger.info(f"状态数据从9维调整为8维: {state_data.shape}")
         
         # 尝试找到动作数据
         action_keys = ["actions", "action"]
@@ -398,42 +388,72 @@ class HDF5Processor:
             action_data = state_data
         
         # 尝试找到图像数据
-        image_keys = ["agentview_rgb", "images", "rgb"]
-        image_data = None
+        image_keys = ["agentview_rgb", "table_cam", "images", "rgb"]
+        front_image_data = None
+        wrist_image_data = None
         
+        # 先尝试找到前视图像
         for key in image_keys:
             if key in file:
-                image_data = np.array(file[key])
+                front_image_data = np.array(file[key])
+                logger.info(f"找到前视图像数据: {key}, shape: {front_image_data.shape}")
                 break
         
-        if image_data is None:
-            logger.warning("未找到图像数据，将创建空图像")
-            image_data = np.zeros((len(state_data), *self.image_size, 3), dtype=np.uint8)
+        # 尝试找到腕部图像
+        wrist_image_keys = ["eye_in_hand_rgb", "wrist_cam"]
+        for key in wrist_image_keys:
+            if key in file:
+                wrist_image_data = np.array(file[key])
+                logger.info(f"找到腕部图像数据: {key}, shape: {wrist_image_data.shape}")
+                break
+        
+        # 如果只找到一种图像，则复制使用
+        if front_image_data is not None and wrist_image_data is None:
+            wrist_image_data = front_image_data
+            logger.info("未找到腕部图像，使用前视图像作为腕部图像")
+        elif front_image_data is None and wrist_image_data is not None:
+            front_image_data = wrist_image_data
+            logger.info("未找到前视图像，使用腕部图像作为前视图像")
+        elif front_image_data is None and wrist_image_data is None:
+            logger.warning("未找到任何图像数据，将创建空图像")
+            front_image_data = np.zeros((len(state_data), *self.image_size, 3), dtype=np.uint8)
+            wrist_image_data = np.zeros((len(state_data), *self.image_size, 3), dtype=np.uint8)
         
         # 确保所有数组长度一致
-        num_frames = min(len(state_data), len(action_data), len(image_data))
+        num_frames = min(len(state_data), len(action_data), len(front_image_data), len(wrist_image_data))
         
         # 处理每一帧
         for i in range(num_frames):
-            # 处理图像
-            if image_data.ndim == 4:  # 有时间维度
-                img = cv2.resize(image_data[i], (self.image_size[1], self.image_size[0]))
+            # 处理前视图像
+            if front_image_data.ndim == 4:  # 有时间维度
+                front_img = cv2.resize(front_image_data[i], (self.image_size[1], self.image_size[0]))
             else:  # 没有时间维度，使用第一张图
-                if len(image_data) > 0:
-                    img = cv2.resize(image_data[0], 
+                if len(front_image_data) > 0:
+                    front_img = cv2.resize(front_image_data[0],
                                    (self.image_size[1], self.image_size[0]))
                 else:
-                    img = np.zeros((*self.image_size, 3), dtype=np.uint8)
+                    front_img = np.zeros((*self.image_size, 3), dtype=np.uint8)
+            
+            # 处理腕部图像
+            if wrist_image_data.ndim == 4:  # 有时间维度
+                wrist_img = cv2.resize(wrist_image_data[i], (self.image_size[1], self.image_size[0]))
+            else:  # 没有时间维度，使用第一张图
+                if len(wrist_image_data) > 0:
+                    wrist_img = cv2.resize(wrist_image_data[0],
+                                   (self.image_size[1], self.image_size[0]))
+                else:
+                    wrist_img = np.zeros((*self.image_size, 3), dtype=np.uint8)
             
             # 修复图像旋转问题：翻转180度
-            img = cv2.flip(img, -1)  # -1表示180度翻转
+            front_img = cv2.flip(front_img, -1)  # -1表示180度翻转
+            wrist_img = cv2.flip(wrist_img, -1)  # -1表示180度翻转
             
             frame_data = {
                 "action": action_data[i].astype(np.float32),
                 "observation.state": state_data[i].astype(np.float32),
-                "observation.images.front": img,
-                "observation.images.wrist": img,  # 使用相同图像作为腕部视图
-                "task": task_str,  # 暂时保留在字典中
+                "observation.images.front": front_img,
+                "observation.images.wrist": wrist_img,
+                "task": task_str,
             }
             episode_frames.append(frame_data)
         
@@ -453,7 +473,7 @@ class RLDSProcessor:
     def get_default_features(self, use_videos: bool = True) -> Dict[str, Dict[str, Any]]:
         """获取Libero数据集的默认特征配置"""
         image_dtype = "video" if use_videos else "image"
-        
+
         return {
             "observation.images.front": {
                 "dtype": image_dtype,
@@ -474,8 +494,8 @@ class RLDSProcessor:
                 "dtype": "float32",
                 "shape": (7,),
                 "names": [f"action_{i}" for i in range(7)],
+            },
             }
-        }
     
     def process_dataset(self, dataset: LeRobotDataset, data_source: Union[str, Path]):
         """处理RLDS数据集"""
@@ -515,12 +535,13 @@ class RLDSProcessor:
                     for step_idx, step in enumerate(steps_list):
                         frame_data = {
                             "observation.images.front": step["observation"]["image"],
-                            "observation.images.wrist": step["observation"]["wrist_image"], 
+                            "observation.images.wrist": step["observation"]["wrist_image"],
                             "observation.state": step["observation"]["state"].astype(np.float32),
                             "action": step["action"].astype(np.float32),
+                            "task": task_str,
                         }
                         # 修复API调用
-                        dataset.add_frame(frame_data, task=task_str)
+                        dataset.add_frame(frame_data)
                     
                     dataset.save_episode()
                     episode_idx += 1
@@ -542,6 +563,23 @@ class UnifiedConverter:
         """
         self.num_workers = num_workers
         self.detector = DatasetFormatDetector()
+        
+        # 设置多进程启动方法，提高Python 3.14兼容性
+        try:
+            if sys.version_info >= (3, 14) and num_workers > 1:
+                logger.warning("Python 3.14+检测到，建议使用--num-workers 1以避免pickle兼容性问题")
+            # 尝试设置更安全的启动方法
+            if hasattr(multiprocessing, 'get_start_method'):
+                current_method = multiprocessing.get_start_method()
+                if current_method != 'spawn':
+                    try:
+                        multiprocessing.set_start_method('spawn', force=True)
+                        logger.info(f"多进程启动方法从 {current_method} 更改为 spawn")
+                    except RuntimeError:
+                        # 如果已经设置过，无法再次设置
+                        logger.debug(f"无法更改多进程启动方法，使用当前方法: {current_method}")
+        except Exception as e:
+            logger.warning(f"设置多进程启动方法时出错: {e}")
     
     def convert_dataset(
         self,
@@ -552,7 +590,7 @@ class UnifiedConverter:
         use_videos: bool = True,
         robot_type: str = "panda",
         fps: int = 20,
-        task_name: str = "default_task",
+        task_name: str = "default_task",  # 已弃用，现在使用TASK_NAME常量
         hub_config: Optional[Dict[str, Any]] = None,
         clean_existing: bool = True,
         image_writer_threads: int = 10,
@@ -571,7 +609,7 @@ class UnifiedConverter:
             use_videos: 是否使用视频格式
             robot_type: 机器人类型
             fps: 帧率
-            task_name: 任务名称（HDF5格式使用）
+            task_name: 任务名称（已弃用，现在使用TASK_NAME常量）
             hub_config: Hub配置
             clean_existing: 是否清理现有数据集
             image_writer_threads: 图像写入线程数
@@ -598,11 +636,12 @@ class UnifiedConverter:
         
         # 设置输出路径
         if output_dir is None:
-            lerobot_root = HF_LEROBOT_HOME
+            # 如果没有指定输出目录，使用默认路径
+            lerobot_root = Path("./outputs")
         else:
             lerobot_root = Path(output_dir)
         
-        os.environ["LEROBOT_HOME"] = str(lerobot_root)
+        os.environ["HF_LEROBOT_HOME"] = str(lerobot_root)
         lerobot_dataset_dir = lerobot_root / repo_id
         
         # 清理现有数据集
@@ -614,6 +653,14 @@ class UnifiedConverter:
         
         # 创建LeRobot数据集
         logger.info(f"创建LeRobot数据集: {repo_id}")
+        logger.info(f"机器人类型: {robot_type}, 帧率: {fps}, 使用视频: {use_videos}")
+        logger.info(f"图像写入进程数: {image_writer_processes}, 线程数: {image_writer_threads}")
+        logger.info(f"特征配置: {features.keys()}")
+
+        # 当使用视频时，使用较小的批处理大小以平衡性能和安全性
+        batch_encoding_size = 10 if use_videos else 100
+        logger.info(f"批处理编码大小: {batch_encoding_size} (使用较小的批处理以防止内存问题)")
+
         dataset = LeRobotDataset.create(
             repo_id=repo_id,
             robot_type=robot_type,
@@ -622,11 +669,12 @@ class UnifiedConverter:
             use_videos=use_videos,
             image_writer_processes=image_writer_processes,
             image_writer_threads=image_writer_threads,
+            batch_encoding_size=batch_encoding_size,
         )
         
         # 处理数据
         if format_type == "hdf5":
-            self._process_hdf5_data(processor, dataset, data_path, task_name)
+            self._process_hdf5_data(processor, dataset, data_path, TASK_NAME)
         else:  # rlds
             # 确保是RLDSProcessor实例
             if isinstance(processor, RLDSProcessor):
@@ -649,6 +697,7 @@ class UnifiedConverter:
     
     def _process_hdf5_data(self, processor: Union[HDF5Processor, RLDSProcessor], dataset: LeRobotDataset, data_path: Path, task_name: str):
         """使用多线程处理HDF5数据"""
+        # 注意：task_name参数已弃用，现在使用TASK_NAME常量
         # 确保是HDF5Processor
         if not isinstance(processor, HDF5Processor):
             raise TypeError("processor必须是HDF5Processor实例")
@@ -667,17 +716,33 @@ class UnifiedConverter:
         
         logger.info(f"找到 {len(episodes)} 个episode文件")
         
-        if self.num_workers == 1:
-            # 单线程处理
+        # 检查Python版本和并行设置
+        import sys
+        use_parallel = self.num_workers > 1 and sys.version_info < (3, 14)
+        
+        if not use_parallel:
+            # 单线程处理（Python 3.14+或num_workers=1）
+            if sys.version_info >= (3, 14):
+                logger.warning("检测到Python 3.14+，由于pickle兼容性问题，使用顺序处理而非并行处理")
             for ep_path in tqdm(episodes, desc="处理Episodes"):
-                processor.process_episode(ep_path, dataset, task_name)
+                processor.process_episode(ep_path, dataset, TASK_NAME)
                 logger.info(f"处理完成: {ep_path.name}")
         else:
             # 多线程处理
-            self._process_episodes_parallel(processor, dataset, episodes, task_name)
+            self._process_episodes_parallel(processor, dataset, episodes, TASK_NAME)
     
     def _process_episodes_parallel(self, processor: HDF5Processor, dataset: LeRobotDataset, episodes: List[Path], task_name: str):
         """并行处理episodes，使用HDF5Processor的统一方法"""
+        # 注意：task_name参数已弃用，现在使用TASK_NAME常量
+        # 检查Python版本，如果是3.14+则使用顺序处理以避免pickle问题
+        import sys
+        if sys.version_info >= (3, 14):
+            logger.warning("检测到Python 3.14+，由于pickle兼容性问题，使用顺序处理而非并行处理")
+            for ep_path in tqdm(episodes, desc="处理Episodes"):
+                processor.process_episode(ep_path, dataset, TASK_NAME)
+                logger.info(f"处理完成: {ep_path.name}")
+            return
+        
         # 创建处理函数
         def process_single_episode(ep_path: Path) -> Tuple[Path, bool, List[List[Dict]]]:
             """处理单个episode并返回帧数据"""
@@ -689,10 +754,10 @@ class UnifiedConverter:
                     # 使用与HDF5Processor相同的检测和处理逻辑
                     if "data" in file:
                         # 新的Libero格式：data/demo_N/...
-                        demos_frames = processor._extract_libero_demo_frames(file, task_name, ep_path)
+                        demos_frames = processor._extract_libero_demo_frames(file, TASK_NAME, ep_path)
                     else:
                         # 尝试其他格式的兜底处理
-                        demos_frames = processor._extract_direct_episode_frames(file, task_name, ep_path)
+                        demos_frames = processor._extract_direct_episode_frames(file, TASK_NAME, ep_path)
                     
                 return ep_path, True, demos_frames
             except Exception as e:
@@ -713,9 +778,8 @@ class UnifiedConverter:
                     # 每个demo作为独立的episode保存
                     for demo_idx, demo_frames in enumerate(demos_frames_list):
                         for frame_data in demo_frames:
-                            # 提取task信息
-                            task_str = frame_data.pop("task", "default_task")
-                            dataset.add_frame(frame_data, task=task_str)
+                            # 不再移除task信息，直接使用
+                            dataset.add_frame(frame_data)
                         dataset.save_episode()
                         logger.info(f"保存episode: {ep_path.name}_demo_{demo_idx}")
     
@@ -764,7 +828,7 @@ def main():
     parser.add_argument("--private", action="store_true", help="创建私有数据集")
     
     # 数据格式
-    parser.add_argument("--use-videos", action="store_true", default=True, help="使用视频格式")
+    parser.add_argument("--use-videos", action="store_true", help="使用视频格式")
     parser.add_argument("--robot-type", type=str, default="panda", help="机器人类型")
     parser.add_argument("--fps", type=int, default=20, help="帧率")
     
@@ -829,7 +893,7 @@ def main():
             use_videos=args.use_videos,
             robot_type=args.robot_type,
             fps=args.fps,
-            task_name=args.task_name,
+            task_name=TASK_NAME,
             hub_config=hub_config,
             image_writer_processes=args.image_writer_processes,
             image_writer_threads=args.image_writer_threads,
