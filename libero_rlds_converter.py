@@ -224,7 +224,9 @@ class HDF5Processor:
             
             # 确保所有数组长度一致
             num_frames = min(len(actions), len(joint_states), len(agentview_rgb), len(eye_in_hand_rgb))
-            
+
+            logger.debug(f"Demo {demo_key}: actions={len(actions)}, states={len(joint_states)}, front={len(agentview_rgb)}, wrist={len(eye_in_hand_rgb)}")
+
             # 处理每一帧
             for i in tqdm(range(num_frames), desc=f"处理 {demo_key}", leave=False):
                 # 处理图像：调整大小到目标尺寸
@@ -592,7 +594,7 @@ class UnifiedConverter:
         fps: int = 20,
         task_name: str = "default_task",  # 已弃用，现在使用TASK_NAME常量
         hub_config: Optional[Dict[str, Any]] = None,
-        clean_existing: bool = True,
+        clean_existing: bool = False,
         image_writer_threads: int = 10,
         image_writer_processes: int = 5,
         run_compute_stats: bool = False,
@@ -644,33 +646,52 @@ class UnifiedConverter:
         os.environ["HF_LEROBOT_HOME"] = str(lerobot_root)
         lerobot_dataset_dir = lerobot_root / repo_id
         
-        # 清理现有数据集
-        if clean_existing and lerobot_dataset_dir.exists():
+        # 检查现有数据集
+        dataset_exists = lerobot_dataset_dir.exists()
+        if clean_existing and dataset_exists:
             logger.info(f"清理现有数据集: {lerobot_dataset_dir}")
             shutil.rmtree(lerobot_dataset_dir)
-        
+            dataset_exists = False
+
         lerobot_root.mkdir(parents=True, exist_ok=True)
-        
-        # 创建LeRobot数据集
-        logger.info(f"创建LeRobot数据集: {repo_id}")
-        logger.info(f"机器人类型: {robot_type}, 帧率: {fps}, 使用视频: {use_videos}")
-        logger.info(f"图像写入进程数: {image_writer_processes}, 线程数: {image_writer_threads}")
-        logger.info(f"特征配置: {features.keys()}")
 
         # 当使用视频时，使用较小的批处理大小以平衡性能和安全性
-        batch_encoding_size = 10 if use_videos else 100
+        batch_encoding_size = 1 if use_videos else 100
         logger.info(f"批处理编码大小: {batch_encoding_size} (使用较小的批处理以防止内存问题)")
 
-        dataset = LeRobotDataset.create(
-            repo_id=repo_id,
-            robot_type=robot_type,
-            fps=fps,
-            features=features,
-            use_videos=use_videos,
-            image_writer_processes=image_writer_processes,
-            image_writer_threads=image_writer_threads,
-            batch_encoding_size=batch_encoding_size,
-        )
+        if dataset_exists:
+            # 加载现有数据集并继续添加数据
+            logger.info(f"加载现有数据集: {repo_id}")
+            logger.info(f"将继续向现有数据集添加新数据...")
+            dataset = LeRobotDataset(
+                repo_id=repo_id,
+                root=lerobot_dataset_dir,
+                batch_encoding_size=batch_encoding_size,
+            )
+
+            # 验证特征兼容性
+            existing_features = dataset.features
+            if set(existing_features.keys()) != set(features.keys()):
+                logger.warning("特征配置不匹配，将使用现有数据集的特征")
+                logger.warning(f"现有特征: {set(existing_features.keys())}")
+                logger.warning(f"请求特征: {set(features.keys())}")
+        else:
+            # 创建新数据集
+            logger.info(f"创建LeRobot数据集: {repo_id}")
+            logger.info(f"机器人类型: {robot_type}, 帧率: {fps}, 使用视频: {use_videos}")
+            logger.info(f"图像写入进程数: {image_writer_processes}, 线程数: {image_writer_threads}")
+            logger.info(f"特征配置: {features.keys()}")
+
+            dataset = LeRobotDataset.create(
+                repo_id=repo_id,
+                robot_type=robot_type,
+                fps=fps,
+                features=features,
+                use_videos=use_videos,
+                image_writer_processes=image_writer_processes,
+                image_writer_threads=image_writer_threads,
+                batch_encoding_size=batch_encoding_size,
+            )
         
         # 处理数据
         if format_type == "hdf5":
@@ -839,6 +860,9 @@ def main():
     parser.add_argument("--num-workers", type=int, default=2, help="并行工作线程数")
     parser.add_argument("--image-writer-processes", type=int, default=5, help="图像写入进程数")
     parser.add_argument("--image-writer-threads", type=int, default=1, help="图像写入线程数")
+
+    # 数据集管理
+    parser.add_argument("--clean-existing", action="store_true", help="清理现有数据集，从头开始")
     
     # Hub配置
     parser.add_argument("--license", type=str, default="apache-2.0", help="数据集许可证")
@@ -897,6 +921,7 @@ def main():
             hub_config=hub_config,
             image_writer_processes=args.image_writer_processes,
             image_writer_threads=args.image_writer_threads,
+            clean_existing=args.clean_existing,
         )
         
         logger.info("✅ 转换完成!")
