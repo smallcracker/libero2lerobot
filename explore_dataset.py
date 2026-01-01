@@ -35,7 +35,7 @@ def analyze_dataset_basic_info(dataset_path: str) -> Dict[str, Any]:
     if not info_file.exists():
         return {"error": "找不到meta/info.json文件"}
 
-    with open(info_file, 'r', encoding='utf-8') as f:
+    with open(info_file, "r", encoding="utf-8") as f:
         info = json.load(f)
 
     # 尝试加载LeRobot数据集
@@ -67,14 +67,14 @@ def analyze_dataset_basic_info(dataset_path: str) -> Dict[str, Any]:
             "fps": info.get("fps", "unknown"),
             "features": info.get("features", {}),
             "splits": info.get("splits", {}),
-            "dataset_size_mb": info.get("data_files_size_in_mb", "unknown")
+            "dataset_size_mb": info.get("data_files_size_in_mb", "unknown"),
         }
 
     except Exception as e:
         return {
             "error": f"加载数据集失败: {str(e)}",
             "dataset_path": str(dataset_path),
-            "info": info
+            "info": info,
         }
 
 
@@ -90,7 +90,7 @@ def analyze_demo_details(dataset_path: str, max_demos: int = 10) -> Dict[str, An
         unique_episodes = sorted(set(episode_indices))
 
         # 限制分析的demo数量
-        episodes_to_analyze = unique_episodes[:min(max_demos, len(unique_episodes))]
+        episodes_to_analyze = unique_episodes[: min(max_demos, len(unique_episodes))]
 
         for ep_idx in episodes_to_analyze:
             # 获取该episode的所有帧索引
@@ -118,14 +118,20 @@ def analyze_demo_details(dataset_path: str, max_demos: int = 10) -> Dict[str, An
             # 分析图像尺寸
             try:
                 # 获取第一帧的图像
-                front_img_data = dataset.frames["observation.images.front"][first_frame_idx]
-                if isinstance(front_img_data, dict) and 'bytes' in front_img_data:
-                    img = Image.open(io.BytesIO(front_img_data['bytes']))
+                front_img_data = dataset.frames["observation.images.front"][
+                    first_frame_idx
+                ]
+                if isinstance(front_img_data, dict) and "bytes" in front_img_data:
+                    img = Image.open(io.BytesIO(front_img_data["bytes"]))
                     image_size = img.size  # (width, height)
                     image_mode = img.mode
                 else:
                     # 如果是直接存储的numpy数组
-                    image_size = front_img_data.shape[:2][::-1] if hasattr(front_img_data, 'shape') else "unknown"
+                    image_size = (
+                        front_img_data.shape[:2][::-1]
+                        if hasattr(front_img_data, "shape")
+                        else "unknown"
+                    )
                     image_mode = "array"
             except:
                 image_size = "unknown"
@@ -134,33 +140,45 @@ def analyze_demo_details(dataset_path: str, max_demos: int = 10) -> Dict[str, An
             # 获取action和state的维度
             try:
                 action_sample = dataset.frames["action"][first_frame_idx]
-                action_dim = action_sample.shape[-1] if hasattr(action_sample, 'shape') else len(action_sample)
+                action_dim = (
+                    action_sample.shape[-1]
+                    if hasattr(action_sample, "shape")
+                    else len(action_sample)
+                )
             except:
                 action_dim = "unknown"
 
             try:
                 state_sample = dataset.frames["observation.state"][first_frame_idx]
-                state_dim = state_sample.shape[-1] if hasattr(state_sample, 'shape') else len(state_sample)
+                state_dim = (
+                    state_sample.shape[-1]
+                    if hasattr(state_sample, "shape")
+                    else len(state_sample)
+                )
             except:
                 state_dim = "unknown"
 
-            demo_info.append({
-                "demo_id": int(ep_idx),
-                "num_frames": len(frame_indices),
-                "avg_dt": float(avg_dt),
-                "std_dt": float(std_dt),
-                "estimated_fps": 1.0 / avg_dt if avg_dt > 0 else 0,
-                "image_size": image_size,
-                "image_mode": image_mode,
-                "action_dim": action_dim,
-                "state_dim": state_dim,
-                "duration_seconds": float(timestamps[-1][0] - timestamps[0][0]) if len(timestamps) > 0 else 0
-            })
+            demo_info.append(
+                {
+                    "demo_id": int(ep_idx),
+                    "num_frames": len(frame_indices),
+                    "avg_dt": float(avg_dt),
+                    "std_dt": float(std_dt),
+                    "estimated_fps": 1.0 / avg_dt if avg_dt > 0 else 0,
+                    "image_size": image_size,
+                    "image_mode": image_mode,
+                    "action_dim": action_dim,
+                    "state_dim": state_dim,
+                    "duration_seconds": float(timestamps[-1][0] - timestamps[0][0])
+                    if len(timestamps) > 0
+                    else 0,
+                }
+            )
 
         return {
             "analyzed_demos": len(demo_info),
             "total_demos": len(unique_episodes),
-            "demo_details": demo_info
+            "demo_details": demo_info,
         }
 
     except Exception as e:
@@ -190,47 +208,58 @@ def analyze_parquet_files(dataset_path: str) -> Dict[str, Any]:
             # 分析每列的数据类型和大小
             column_info = {}
             for col in df.columns:
-                if col == 'observation.images.front' or col == 'observation.images.wrist':
+                if (
+                    col == "observation.images.front"
+                    or col == "observation.images.wrist"
+                ):
                     # 图像列的特殊分析
                     sample = df[col].iloc[0] if len(df) > 0 else None
-                    if isinstance(sample, dict) and 'bytes' in sample:
+                    if isinstance(sample, dict) and "bytes" in sample:
                         column_info[col] = {
                             "dtype": str(df[col].dtype),
-                            "sample_size_bytes": len(sample['bytes']),
-                            "format": "image_binary"
+                            "sample_size_bytes": len(sample["bytes"]),
+                            "format": "image_binary",
                         }
                     else:
                         column_info[col] = {
                             "dtype": str(df[col].dtype),
-                            "shape": str(df[col].iloc[0].shape) if hasattr(df[col].iloc[0], 'shape') else "unknown",
-                            "format": "array"
+                            "shape": str(df[col].iloc[0].shape)
+                            if hasattr(df[col].iloc[0], "shape")
+                            else "unknown",
+                            "format": "array",
                         }
                 else:
                     column_info[col] = {
                         "dtype": str(df[col].dtype),
-                        "shape": str(df[col].iloc[0].shape) if len(df) > 0 and hasattr(df[col].iloc[0], 'shape') else "scalar"
+                        "shape": str(df[col].iloc[0].shape)
+                        if len(df) > 0 and hasattr(df[col].iloc[0], "shape")
+                        else "scalar",
                     }
 
-            file_info.append({
-                "file_path": str(parquet_file.relative_to(dataset_path)),
-                "rows": len(df),
-                "columns": list(df.columns),
-                "file_size_mb": parquet_file.stat().st_size / (1024 * 1024),
-                "column_details": column_info
-            })
+            file_info.append(
+                {
+                    "file_path": str(parquet_file.relative_to(dataset_path)),
+                    "rows": len(df),
+                    "columns": list(df.columns),
+                    "file_size_mb": parquet_file.stat().st_size / (1024 * 1024),
+                    "column_details": column_info,
+                }
+            )
 
             total_rows += len(df)
 
         except Exception as e:
-            file_info.append({
-                "file_path": str(parquet_file.relative_to(dataset_path)),
-                "error": str(e)
-            })
+            file_info.append(
+                {
+                    "file_path": str(parquet_file.relative_to(dataset_path)),
+                    "error": str(e),
+                }
+            )
 
     return {
         "total_parquet_files": len(parquet_files),
         "total_rows": total_rows,
-        "files": file_info
+        "files": file_info,
     }
 
 
@@ -251,7 +280,9 @@ def print_summary(dataset_path: str):
     print(f"  总Episodes: {basic_info['total_episodes']}")
     print(f"  总帧数: {basic_info['total_frames']}")
     print(f"  平均Episode长度: {basic_info['avg_episode_length']:.1f} 帧")
-    print(f"  Episode长度范围: {basic_info['min_episode_length']} - {basic_info['max_episode_length']} 帧")
+    print(
+        f"  Episode长度范围: {basic_info['min_episode_length']} - {basic_info['max_episode_length']} 帧"
+    )
     print(f"  FPS: {basic_info['fps']}")
     print(f"  数据集大小: {basic_info['dataset_size_mb']} MB")
 
@@ -307,13 +338,13 @@ def main():
         analysis_result = {
             "basic_info": analyze_dataset_basic_info(args.dataset_path),
             "demo_details": analyze_demo_details(args.dataset_path, args.max_demos),
-            "parquet_analysis": analyze_parquet_files(args.dataset_path)
+            "parquet_analysis": analyze_parquet_files(args.dataset_path),
         }
 
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump(analysis_result, f, indent=2, ensure_ascii=False)
 
         print(f"\n💾 详细分析结果已保存到: {args.output}")
