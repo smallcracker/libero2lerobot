@@ -571,9 +571,6 @@ class HDF5Processor:
                     eye_in_hand_rgb[i], (self.image_size[1], self.image_size[0])
                 )
 
-                front_img = cv2.flip(front_img, -1)
-                wrist_img = cv2.flip(wrist_img, -1)
-
                 frame_data = {
                     "action": actions[i].astype(np.float32),
                     "observation.state": joint_states[i].astype(np.float32),
