@@ -52,7 +52,9 @@ from lerobot.utils.utils import init_logging
 V21 = "v2.1"
 V30 = "v3.0"
 
-LEGACY_DATA_PATH_TEMPLATE = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+LEGACY_DATA_PATH_TEMPLATE = (
+    "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+)
 LEGACY_VIDEO_PATH_TEMPLATE = (
     "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 )
@@ -149,7 +151,9 @@ def convert_info(
         if ft.get("dtype") != "video":
             ft.pop("fps", None)
 
-    info["total_chunks"] = math.ceil(total_episodes / chunks_size) if total_episodes > 0 else 0
+    info["total_chunks"] = (
+        math.ceil(total_episodes / chunks_size) if total_episodes > 0 else 0
+    )
     info["total_videos"] = total_episodes * len(video_keys)
 
     write_info(info, new_root)
@@ -174,10 +178,16 @@ def convert_data(
     logging.info("Converting consolidated parquet files back to per-episode files")
     grouped = _group_episodes_by_data_file(episode_records)
 
-    for (chunk_idx, file_idx), records in tqdm.tqdm(grouped.items(), desc="convert data files"):
-        source_path = root / DEFAULT_DATA_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
+    for (chunk_idx, file_idx), records in tqdm.tqdm(
+        grouped.items(), desc="convert data files"
+    ):
+        source_path = root / DEFAULT_DATA_PATH.format(
+            chunk_index=chunk_idx, file_index=file_idx
+        )
         if not source_path.exists():
-            raise FileNotFoundError(f"Expected source parquet file not found: {source_path}")
+            raise FileNotFoundError(
+                f"Expected source parquet file not found: {source_path}"
+            )
 
         table = pq.read_table(source_path)
         records = sorted(records, key=lambda rec: int(rec["dataset_from_index"]))
@@ -249,10 +259,14 @@ def _validate_video_paths(src: Path, dst: Path) -> None:
     # Validate file extensions for video files
     valid_video_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
     if src_resolved.suffix.lower() not in valid_video_extensions:
-        raise ValueError(f"Source file does not have a valid video extension: {src_resolved}")
+        raise ValueError(
+            f"Source file does not have a valid video extension: {src_resolved}"
+        )
 
     if dst_resolved.suffix.lower() not in valid_video_extensions:
-        raise ValueError(f"Destination file does not have a valid video extension: {dst_resolved}")
+        raise ValueError(
+            f"Destination file does not have a valid video extension: {dst_resolved}"
+        )
 
     # Check for path traversal attempts in the original paths
     src_str = str(src)
@@ -267,11 +281,16 @@ def _validate_video_paths(src: Path, dst: Path) -> None:
 
     # Additional check: ensure resolved paths don't point to system directories
     system_dirs = {"/etc", "/sys", "/proc", "/dev", "/boot", "/root"}
-    for resolved_path, name in [(src_resolved, "source"), (dst_resolved, "destination")]:
+    for resolved_path, name in [
+        (src_resolved, "source"),
+        (dst_resolved, "destination"),
+    ]:
         path_str = str(resolved_path)
         for sys_dir in system_dirs:
             if path_str.startswith(sys_dir + "/") or path_str == sys_dir:
-                raise ValueError(f"Path points to system directory: {name} path {resolved_path}")
+                raise ValueError(
+                    f"Path points to system directory: {name} path {resolved_path}"
+                )
 
     # Ensure the destination directory can be created safely
     try:
@@ -338,7 +357,9 @@ def _extract_video_segment(
             text=True,  # 5 minute timeout
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"ffmpeg timed out while processing video '{src}' -> '{dst}'") from exc
+        raise RuntimeError(
+            f"ffmpeg timed out while processing video '{src}' -> '{dst}'"
+        ) from exc
     except FileNotFoundError as exc:
         raise RuntimeError(
             "ffmpeg executable not found; it is required for video conversion"
@@ -381,7 +402,8 @@ def convert_videos(
                 raise FileNotFoundError(f"Expected MP4 file not found: {src_path}")
 
             records = sorted(
-                records, key=lambda rec: float(rec[f"videos/{video_key}/from_timestamp"])
+                records,
+                key=lambda rec: float(rec[f"videos/{video_key}/from_timestamp"]),
             )
 
             for record in records:
@@ -399,7 +421,9 @@ def convert_videos(
                 _extract_video_segment(src_path, dest_path, start=start, end=end)
 
 
-def convert_episodes_metadata(new_root: Path, episode_records: list[dict[str, Any]]) -> None:
+def convert_episodes_metadata(
+    new_root: Path, episode_records: list[dict[str, Any]]
+) -> None:
     logging.info("Reconstructing legacy episodes and episodes_stats JSONL files")
 
     episodes_path = new_root / LEGACY_EPISODES_PATH
@@ -410,7 +434,9 @@ def convert_episodes_metadata(new_root: Path, episode_records: list[dict[str, An
         jsonlines.open(episodes_path, mode="w") as episodes_writer,
         jsonlines.open(stats_path, mode="w") as stats_writer,
     ):
-        for record in sorted(episode_records, key=lambda rec: int(rec["episode_index"])):
+        for record in sorted(
+            episode_records, key=lambda rec: int(rec["episode_index"])
+        ):
             legacy_episode = {
                 key: value
                 for key, value in record.items()
@@ -433,7 +459,9 @@ def convert_episodes_metadata(new_root: Path, episode_records: list[dict[str, An
             }
             episodes_writer.write(serializable_episode)
 
-            stats_flat = {key: record[key] for key in record if key.startswith("stats/")}
+            stats_flat = {
+                key: record[key] for key in record if key.startswith("stats/")
+            }
             stats_nested = unflatten_dict(stats_flat).get("stats", {})
             stats_serialized = serialize_dict(stats_nested)
             stats_writer.write(
@@ -467,7 +495,9 @@ def convert_dataset(
     root = HF_LEROBOT_HOME / repo_id if root is None else Path(root) / repo_id
 
     if root.exists() and force_conversion:
-        logging.info("--force-conversion enabled: removing existing snapshot at %s", root)
+        logging.info(
+            "--force-conversion enabled: removing existing snapshot at %s", root
+        )
         shutil.rmtree(root)
 
     if root.exists():
@@ -479,7 +509,9 @@ def convert_dataset(
 
     episode_records = load_episode_records(root)
     info = load_info(root)
-    video_keys = [key for key, ft in info["features"].items() if ft.get("dtype") == "video"]
+    video_keys = [
+        key for key, ft in info["features"].items() if ft.get("dtype") == "video"
+    ]
     chunks_size = info.get("chunks_size", DEFAULT_CHUNK_SIZE)
 
     backup_root = root.parent / f"{root.name}_{V30}"
