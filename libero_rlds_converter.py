@@ -139,6 +139,83 @@ class DatasetFormatDetector:
             raise ValueError(f"无法检测数据格式：{data_path}")
 
 
+class RunningStats:
+    """增量统计计算器，避免内存溢出"""
+
+    def __init__(self, is_video: bool = False):
+        self.is_video = is_video
+        self.count = 0
+        self.min = None
+        self.max = None
+        self.sum = None
+        self.sum_sq = None
+
+    def update(self, data: np.ndarray):
+        if self.is_video:
+            # 图像数据归一化并展平空间维度
+            if np.issubdtype(data.dtype, np.integer):
+                data = data.astype(np.float64) / 255.0
+            else:
+                data = data.astype(np.float64)
+            # (N, H, W, C) -> (N*H*W, C)
+            C = data.shape[-1]
+            data = data.reshape(-1, C)
+        else:
+            data = data.astype(np.float64)
+
+        batch_count = data.shape[0]
+        if batch_count == 0:
+            return
+
+        self.count += batch_count
+
+        batch_min = data.min(axis=0)
+        batch_max = data.max(axis=0)
+        batch_sum = data.sum(axis=0)
+        batch_sum_sq = (data**2).sum(axis=0)
+
+        if self.min is None:
+            self.min = batch_min
+            self.max = batch_max
+            self.sum = batch_sum
+            self.sum_sq = batch_sum_sq
+        else:
+            self.min = np.minimum(self.min, batch_min)
+            self.max = np.maximum(self.max, batch_max)
+            self.sum += batch_sum
+            self.sum_sq += batch_sum_sq
+
+    def get_stats(self) -> Dict[str, Any]:
+        if self.count == 0:
+            return {}
+
+        mean = self.sum / self.count
+        mean_sq = self.sum_sq / self.count
+        var = np.maximum(mean_sq - mean**2, 0)
+        std = np.sqrt(var)
+
+        if self.is_video:
+            # 格式化为 (C, 1, 1)
+            def fmt(arr):
+                return arr.reshape(-1, 1, 1).tolist()
+
+            return {
+                "min": fmt(self.min),
+                "max": fmt(self.max),
+                "mean": fmt(mean),
+                "std": fmt(std),
+                "count": [self.count],
+            }
+        else:
+            return {
+                "min": self.min.tolist(),
+                "max": self.max.tolist(),
+                "mean": mean.tolist(),
+                "std": std.tolist(),
+                "count": self.count,
+            }
+
+
 class LeRobotDatasetV21Writer:
     """LeRobot v2.1 格式数据集写入器"""
 
@@ -174,10 +251,10 @@ class LeRobotDatasetV21Writer:
         ]
 
         # 统计信息收集器 - 用于计算全局统计
-        self.stats_collector: Dict[str, List[np.ndarray]] = {}
+        self.stats_collector: Dict[str, RunningStats] = {}
         for key in self.features:
-            if self.features[key].get("dtype") != "video":
-                self.stats_collector[key] = []
+            is_video = self.features[key].get("dtype") == "video"
+            self.stats_collector[key] = RunningStats(is_video=is_video)
 
         # 创建目录结构
         self._init_directories()
@@ -248,11 +325,11 @@ class LeRobotDatasetV21Writer:
                 if key in frame:
                     value = frame[key]
                     if isinstance(value, np.ndarray):
-                        values.append(value.astype(np.float64))
+                        values.append(value)
             if values:
                 # 将整个episode的数据堆叠起来
                 stacked = np.stack(values, axis=0)
-                self.stats_collector[key].append(stacked)
+                self.stats_collector[key].update(stacked)
 
     def _prepare_parquet_data(self, task_index: int) -> Dict[str, List]:
         """准备parquet格式的数据"""
@@ -418,30 +495,10 @@ class LeRobotDatasetV21Writer:
         """保存 stats.json - 全局统计信息"""
         stats = {}
 
-        for key, data_list in self.stats_collector.items():
-            if not data_list:
+        for key, collector in self.stats_collector.items():
+            feature_stats = collector.get_stats()
+            if not feature_stats:
                 continue
-
-            # 将所有episode的数据合并
-            all_data = np.concatenate(data_list, axis=0)
-
-            # 计算统计信息
-            feature_stats = {
-                "min": all_data.min(axis=0).tolist(),
-                "max": all_data.max(axis=0).tolist(),
-                "mean": all_data.mean(axis=0).tolist(),
-                "std": all_data.std(axis=0).tolist(),
-            }
-
-            # 如果是标量，展开为单个值
-            if (
-                isinstance(feature_stats["min"], list)
-                and len(feature_stats["min"]) == 1
-            ):
-                for stat_key in feature_stats:
-                    if isinstance(feature_stats[stat_key], list):
-                        feature_stats[stat_key] = feature_stats[stat_key]
-
             stats[key] = feature_stats
 
         stats_path = self.root / "meta" / "stats.json"
