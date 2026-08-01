@@ -1,302 +1,303 @@
-# Libero统一数据转换器
+# Libero HDF5/RLDS 转 LeRobot v2.1
 
-## 概述
+本项目使用 `libero_rlds_converter.py` 将 Libero HDF5 或 RLDS 数据转换为
+LeRobot v2.1（legacy layout）格式。
 
-这个统一转换器支持自动识别和转换两种Libero数据格式：
-- **RLDS格式**: TensorFlow Records格式的Libero数据集
-- **HDF5格式**: 基于HDF5文件的自定义数据集
-
-转换器会自动检测数据格式，并使用相应的处理器将数据转换为LeRobot格式。
-
-## 功能特性
-
-✅ **格式自动检测**: 自动识别RLDS和HDF5格式  
-✅ **多线程处理**: 支持并行处理提高转换速度  
-✅ **视频压缩**: 支持视频格式存储图像数据，节省60倍存储空间  
-✅ **灵活配置**: 支持自定义特征配置文件  
-✅ **Hub集成**: 直接推送到Hugging Face Hub  
-
-## 安装依赖
+当前真正的命令行入口是：
 
 ```bash
-# 基础依赖
-pip install opencv-python h5py tqdm numpy
+python libero_rlds_converter.py
+```
 
-# RLDS支持（可选）
+`main.py` 目前只是占位程序，README 中不要使用 `run_converter.py` 或
+`main.py` 作为转换入口。
+
+## 支持范围
+
+- 自动检测 HDF5 和 RLDS。检测到两种格式时优先使用 HDF5。
+- HDF5 转换为单线程执行；每个 `data/demo_N` 会被写成一个 LeRobot episode。
+- 输出 LeRobot v2.1 目录结构，包括 parquet、可选视频和 `meta` 元数据。
+- HDF5 图像会缩放为 `256 x 256 x 3`。
+- 使用 `--use-videos` 时，图像写入 `videos/` 下的 MP4 文件；否则图像数组直接写入 parquet。
+
+## 安装
+
+项目要求 Python 3.10 或更高版本。使用 uv 时：
+
+```bash
+uv sync
+uv pip install --python .venv pandas pyarrow jsonlines
+```
+
+或使用 pip：
+
+```bash
+pip install -e . pandas pyarrow jsonlines
+```
+
+`libero_rlds_converter.py` 直接导入 `pandas`、`pyarrow` 和 `jsonlines`；如果
+当前环境没有这些包，需要显式安装。
+
+RLDS 支持是可选的：
+
+```bash
 pip install tensorflow tensorflow-datasets
-
-# LeRobot核心包
-pip install lerobot
 ```
 
-## 使用方法
+没有安装 `tensorflow-datasets` 时，HDF5 转换仍可使用，但 RLDS 转换不可用。
 
-### 1. 基本用法（自动格式检测）
+## 基本用法
+
+### HDF5 转换
 
 ```bash
-python run_converter.py \
-  --data-dir /path/to/your/data \
-  --repo-id username/dataset_name \
+python libero_rlds_converter.py \
+  --data-dir /path/to/hdf5_data \
+  --output-dir /path/to/output_root \
+  --repo-id local/libero_dataset \
   --use-videos \
-  --push-to-hub
+  --robot-type panda \
+  --fps 20 \
+  --verbose
 ```
 
-### 2. HDF5格式数据
+输出路径由 `output-dir` 和 `repo-id` 拼接得到：
 
-```bash
-# 使用默认配置
-python run_converter.py \
-  --data-dir /path/to/hdf5/data \
-  --repo-id username/hdf5_dataset \
-  --task-name "pick_and_place" \
-  --num-workers 8
-
-# 使用自定义配置文件
-python run_converter.py \
-  --data-dir /path/to/hdf5/data \
-  --repo-id username/hdf5_dataset \
-  --config config_example.json \
-  --task-name "manipulation_task" \
-  --num-workers 4
+```text
+/path/to/output_root/local/libero_dataset
 ```
 
-### 3. RLDS格式数据（传统模式）
+如果省略 `--output-dir`，默认输出到：
+
+```text
+~/.cache/huggingface/lerobot/<repo-id>
+```
+
+`repo-id` 必须包含 `/`，例如 `stack-cube-fix/franka`。它在本地路径中是
+子目录名，不代表脚本会自动上传到 Hugging Face Hub。
+
+### 当前数据集示例
+
+将 `/data/yangnan/VLA/dataset/stack-cube-rotate` 转换到
+`/data/yangnan/VLA/dataset/stack-cube-fix/franka`：
 
 ```bash
-python run_converter.py \
-  --data-dir /path/to/rlds/data \
-  --repo-id username/libero_dataset \
+python libero_rlds_converter.py \
+  --data-dir /data/yangnan/VLA/dataset/stack-cube-rotate \
+  --output-dir /data/yangnan/VLA/dataset \
+  --repo-id stack-cube-fix/franka \
+  --use-videos \
+  --robot-type panda \
+  --fps 20 \
+  --clean-existing \
+  --verbose
+```
+
+`--clean-existing` 会删除已经存在的
+`/data/yangnan/VLA/dataset/stack-cube-fix/franka`，请确认目标目录可以重建后
+再使用。
+
+### RLDS 转换
+
+```bash
+python libero_rlds_converter.py \
+  --data-dir /path/to/rlds_data \
+  --output-dir /path/to/output_root \
+  --repo-id local/libero_rlds \
   --use-videos \
   --fps 20
 ```
 
-### 4. 强制指定格式
+RLDS 处理器会依次尝试加载以下固定数据集名称：
 
-```bash
-# 强制使用HDF5处理器
-python run_converter.py \
-  --data-dir /path/to/data \
-  --repo-id username/dataset \
-  --force-format hdf5 \
-  --task-name "custom_task"
-
-# 强制使用RLDS处理器
-python run_converter.py \
-  --data-dir /path/to/data \
-  --repo-id username/dataset \
-  --force-format rlds
-```
-
-## 数据格式要求
-
-### HDF5格式
-
-期望的目录结构：
-```
-data_dir/
-├── episode_001/
-│   └── data/
-│       └── trajectory.hdf5
-├── episode_002/
-│   └── data/
-│       └── trajectory.hdf5
-└── ...
-```
-
-或者直接包含HDF5文件：
-```
-data_dir/
-├── trajectory_001.hdf5
-├── trajectory_002.hdf5
-└── ...
-```
-
-HDF5文件内部结构：
-```
-trajectory.hdf5
-├── puppet/
-│   ├── joint_position      # 机器人关节位置 [N, 7]
-│   └── ...
-├── observations/
-│   ├── rgb_images/
-│   │   └── camera_top     # RGB图像数据 [N, H, W, 3]
-│   └── ...
-```
-
-### RLDS格式
-
-支持的数据集：
 - `libero_10_no_noops`
 - `libero_goal_no_noops`
 - `libero_object_no_noops`
 - `libero_spatial_no_noops`
 
-数据集应包含标准的TensorFlow Records文件和dataset_info.json。
+每个数据集需要能被 `tensorflow_datasets.load(..., data_dir=<data-dir>, split="train")`
+加载，并提供 `steps`，其中包含 `observation.image`、
+`observation.wrist_image`、`observation.state` 和 `action`。
 
-## 配置文件格式
+## 输入 HDF5 格式
 
-对于HDF5数据，可以创建JSON配置文件来定义特征结构：
+脚本会递归查找 `.hdf5` 和 `.h5` 文件。支持直接放置文件：
 
-```json
-{
-  "observation.images.camera_top": {
-    "dtype": "image",
-    "shape": [640, 360, 3],
-    "names": ["height", "width", "channel"]
-  },
-  "observation.state": {
-    "dtype": "float32",
-    "shape": [7],
-    "names": ["state_0", "state_1", "state_2", "state_3", "state_4", "state_5", "state_6"]
-  },
-  "action": {
-    "dtype": "float32", 
-    "shape": [7],
-    "names": ["action_0", "action_1", "action_2", "action_3", "action_4", "action_5", "action_6"]
-  }
-}
+```text
+hdf5_data/
+├── dataset_1.hdf5
+├── dataset_2.hdf5
+└── ...
 ```
-需要查看数据格式，可以使用下面的方法
+
+也支持 Libero episode 目录：
+
+```text
+hdf5_data/
+├── episode_001/
+│   └── data/
+│       └── trajectory.hdf5
+└── episode_002/
+    └── data/
+        └── trajectory.hdf5
+```
+
+每个 HDF5 文件必须包含 `data`，并在其中包含一个或多个按数字命名的
+`demo_N` 组：
+
+```text
+file.hdf5
+└── data/
+    └── demo_0/
+        ├── actions          [N, 7]
+        └── obs/
+            ├── eef_pos      [N, 3]
+            ├── eef_quat     [N, 4]
+            ├── gripper_pos  [N, 2]
+            ├── table_cam    [N, H, W, 3]
+            └── wrist_cam    [N, H, W, 3]
+```
+
+图像也可以使用以下另一组名称：
+
+```text
+obs/agentview_rgb
+obs/eye_in_hand_rgb
+```
+
+其中 `eef_quat` 按 `[x, y, z, w]` 解释。脚本将
+`eef_pos + 四元数转欧拉角 + gripper_pos` 拼成 8 维
+`observation.state`，并将 `actions` 作为 7 维 `action`。
+
+如果四类数据的帧数不一致，脚本会截断到最短长度。缺少 `data`、必要状态
+数据集或两路图像时，该 HDF5 文件会被跳过并记录错误日志。
+
+可以用 h5py 查看文件结构：
+
 ```bash
-h5dump -H /media/bigdisk/Isaac-GR00T/demo_data/libero_hdf5/libero_10/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo.hdf5 | head -300
-```
-或者使用python代码
-
-```python
+python - <<'PY'
 import h5py
-import numpy as np
+from pathlib import Path
 
-file_path = '/media/bigdisk/Isaac-GR00T/demo_data/libero_hdf5/libero_10/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it_demo.hdf5'
+path = Path("/path/to/file.hdf5")
 
-def print_hdf5_structure(file_path, max_depth=3):
-    def print_keys(obj, level=0, max_depth=3):
-        if level > max_depth:
-            return
-        
-        if hasattr(obj, 'keys'):
-            for key in obj.keys():
-                print('  ' * level + f'{key}')
-                if hasattr(obj[key], 'keys'):
-                    print_keys(obj[key], level+1, max_depth)
-                else:
-                    # 打印数据集的形状信息
-                    try:
-                        shape = obj[key].shape
-                        dtype = obj[key].dtype
-                        print('  ' * (level+1) + f'-> shape: {shape}, dtype: {dtype}')
-                    except:
-                        pass
-    
-    with h5py.File(file_path, 'r') as f:
-        print(f'HDF5文件结构: {file_path}')
-        print_keys(f, max_depth=max_depth)
-
-print_hdf5_structure(file_path)
+with h5py.File(path, "r") as file:
+    file.visititems(
+        lambda name, obj: print(
+            name,
+            getattr(obj, "shape", ""),
+            getattr(obj, "dtype", ""),
+        )
+    )
+PY
 ```
+
+## 输出格式
+
+转换结果是一个 LeRobot v2.1 数据集：
+
+```text
+<output-dir>/<repo-id>/
+├── data/
+│   └── chunk-000/
+│       └── episode_000000.parquet
+├── videos/                         # 仅使用 --use-videos 时生成
+│   └── chunk-000/
+│       ├── observation.images.front/
+│       │   └── episode_000000.mp4
+│       └── observation.images.wrist/
+│           └── episode_000000.mp4
+└── meta/
+    ├── episodes.jsonl
+    ├── episodes_stats.jsonl
+    ├── info.json
+    ├── stats.json
+    └── tasks.jsonl
+```
+
+HDF5 的默认特征为：
+
+| 特征 | 类型 | 形状 |
+| --- | --- | --- |
+| `observation.images.front` | `video` 或 `image` | `256 x 256 x 3` |
+| `observation.images.wrist` | `video` 或 `image` | `256 x 256 x 3` |
+| `observation.state` | `float32` | `8` |
+| `action` | `float32` | `7` |
 
 ## 命令行参数
 
-### 必需参数
-- `--data-dir`: 数据目录路径
-- `--repo-id`: 数据集仓库ID (格式: username/dataset_name)
+实际参数以 `python libero_rlds_converter.py --help` 为准：
 
-### 输出配置
-- `--output-dir`: 本地输出目录
-- `--push-to-hub`: 推送到Hugging Face Hub
-- `--private`: 创建私有数据集
+| 参数 | 说明 |
+| --- | --- |
+| `--data-dir PATH` | 必填，输入数据目录 |
+| `--repo-id NAME/NAME` | 必填，输出数据集相对路径，必须包含 `/` |
+| `--output-dir PATH` | 输出根目录；省略时使用 `~/.cache/huggingface/lerobot/` |
+| `--use-videos` | 将图像写为 MP4；不使用时图像数组写入 parquet |
+| `--robot-type NAME` | 写入 `meta/info.json` 的机器人类型，默认 `panda` |
+| `--fps INT` | 视频帧率、时间戳和元数据中的帧率，默认 `20` |
+| `--clean-existing` | 删除同名输出目录后重新转换 |
+| `--verbose` | 输出更详细的日志 |
+| `--dry-run` | 只检查输入目录存在且 `repo-id` 含 `/`，不读取数据 |
+| `--task-name TEXT` | 当前 CLI 接受该参数，但转换器实际使用代码中的固定任务名 |
+| `--push-to-hub` | 当前 CLI 接受该参数，但脚本未实现 Hub 上传 |
+| `--private` | 当前 CLI 接受该参数，但脚本未实现 Hub 权限设置 |
 
-### 数据格式
-- `--use-videos`: 使用视频格式存储图像
-- `--robot-type`: 机器人类型 (默认: panda)
-- `--fps`: 帧率 (默认: 20)
+当前版本没有 `--config`、`--num-workers`、`--force-format`、`--tags` 或
+`--image-writer-*` 参数。README、旧脚本或其他项目中的这些参数不能用于本
+脚本。
 
-### HDF5特定
-- `--config`: 配置文件路径
-- `--task-name`: 任务名称
+HDF5 转换器当前是单线程的，不支持通过命令行设置 worker 数量。
 
-### 性能调优
-- `--num-workers`: 并行线程数 (默认: 4)
-- `--image-writer-processes`: 图像写入进程数 (默认: 5)
-- `--image-writer-threads`: 图像写入线程数 (默认: 10)
+## 故障排查
 
-### 调试选项
-- `--verbose`: 详细日志
-- `--dry-run`: 试运行模式
-- `--force-format`: 强制指定格式 (rlds/hdf5)
+### 无法检测数据格式
 
-## 性能优化建议
+确认 `--data-dir` 下递归包含 `.hdf5`/`.h5` 文件，或包含 RLDS 的
+`.tfrecord*`、`dataset_info.json` 或 `features.json`。
 
-1. **多线程处理**: 增加`--num-workers`可以提高处理速度，但要注意内存使用
-2. **视频压缩**: 使用`--use-videos`可以显著减少存储空间
-3. **图像写入**: 调整`--image-writer-processes`和`--image-writer-threads`参数
-4. **内存管理**: 处理大数据集时，考虑分批处理
+### HDF5 文件被跳过
 
-## 故障排除
+检查文件顶层是否有 `data`，以及每个 `data/demo_N` 是否包含：
 
-### 常见错误
+- `actions`
+- `obs/eef_pos`
+- `obs/eef_quat`
+- `obs/gripper_pos`
+- `obs/table_cam` 和 `obs/wrist_cam`，或 `obs/agentview_rgb` 和 `obs/eye_in_hand_rgb`
 
-1. **导入错误**
-   ```
-   ImportError: No module named 'cv2'
-   ```
-   解决：`pip install opencv-python`
-
-2. **HDF5文件找不到**
-   ```
-   ValueError: 无法检测数据格式
-   ```
-   解决：检查数据目录结构，确保包含.hdf5文件
-
-3. **内存不足**
-   ```
-   MemoryError: 
-   ```
-   解决：减少`--num-workers`参数，或分批处理数据
-
-### 调试模式
-
-使用`--verbose --dry-run`可以检查配置而不执行转换：
+### 缺少 Python 模块
 
 ```bash
-python run_converter.py \
+pip install -e . pandas pyarrow jsonlines
+```
+
+RLDS 还需要：
+
+```bash
+pip install tensorflow tensorflow-datasets
+```
+
+### 先做参数检查
+
+```bash
+python libero_rlds_converter.py \
   --data-dir /path/to/data \
-  --repo-id test/dataset \
-  --verbose \
-  --dry-run
-```
-
-## 示例工作流
-
-### 完整的HDF5转换流程
-
-```bash
-# 1. 检查数据结构
-python run_converter.py \
-  --data-dir ./hdf5_data \
   --repo-id test/check \
-  --dry-run --verbose
-
-# 2. 本地转换测试
-python run_converter.py \
-  --data-dir ./hdf5_data \
-  --repo-id test/local_test \
-  --task-name "manipulation" \
-  --num-workers 4
-
-# 3. 推送到Hub
-python run_converter.py \
-  --data-dir ./hdf5_data \
-  --repo-id username/final_dataset \
-  --task-name "manipulation" \
-  --push-to-hub \
-  --tags manipulation robotics panda \
-  --num-workers 8
+  --dry-run \
+  --verbose
 ```
 
-## 贡献
+注意：`--dry-run` 不会检测 HDF5 内部结构，也不会验证依赖是否完整。
 
-欢迎提交Issue和Pull Request来改进这个转换器！
+## 相关脚本
+
+- `libero_rlds_converter.py`: HDF5/RLDS 到 LeRobot v2.1 的实际转换器。
+- `convert_v3_to_v2.py`: 将已有 LeRobot v3.0 数据集转换回 v2.1，与 HDF5/RLDS
+  转换流程无关。
+- `run.sh` 和 `debug.sh`: 包含特定机器的硬编码路径，仅供原环境参考，使用前
+  需要自行修改。
 
 ## 许可证
 
-Apache 2.0 
+Apache 2.0

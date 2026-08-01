@@ -27,6 +27,7 @@ import jsonlines
 import numpy as np
 import pyarrow.parquet as pq
 import tqdm
+from video_metadata import get_v21_video_info
 
 
 if __package__ is None or __package__ == "":
@@ -148,7 +149,14 @@ def convert_info(
 
     # Restore per-feature metadata: camera entries already contain their own fps.
     for key, ft in info["features"].items():
-        if ft.get("dtype") != "video":
+        if ft.get("dtype") == "video":
+            video_paths = sorted(
+                (new_root / "videos").glob(f"chunk-*/{key}/episode_*.mp4")
+            )
+            if not video_paths:
+                raise RuntimeError(f"No converted video found for feature '{key}'")
+            ft["video_info"] = get_v21_video_info(video_paths[0])
+        else:
             ft.pop("fps", None)
 
     info["total_chunks"] = (
@@ -524,11 +532,11 @@ def convert_dataset(
 
     new_root.mkdir(parents=True, exist_ok=True)
 
-    convert_info(root, new_root, episode_records, video_keys)
     copy_global_stats(root, new_root)
     convert_tasks(root, new_root)
     convert_data(root, new_root, episode_records, chunks_size)
     convert_videos(root, new_root, episode_records, video_keys, chunks_size)
+    convert_info(root, new_root, episode_records, video_keys)
     convert_episodes_metadata(new_root, episode_records)
     copy_ancillary_directories(root, new_root)
 

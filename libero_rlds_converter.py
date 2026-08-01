@@ -22,6 +22,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 import jsonlines
+from video_metadata import get_v21_video_info
 
 # 检查依赖
 try:
@@ -429,6 +430,7 @@ class LeRobotDatasetV21Writer:
 
     def _save_info(self):
         """保存 info.json"""
+        self._update_video_info()
         total_episodes = self.episode_index
 
         info = {
@@ -455,6 +457,23 @@ class LeRobotDatasetV21Writer:
         info_path = self.root / "meta" / "info.json"
         with open(info_path, "w") as f:
             json.dump(info, f, indent=4)
+
+    def _update_video_info(self):
+        """将实际生成的 MP4 元数据写入视频特征。"""
+        if not self.video_keys:
+            return
+
+        for video_key in self.video_keys:
+            video_paths = sorted(
+                (self.root / "videos").glob(f"chunk-*/{video_key}/episode_*.mp4")
+            )
+            if not video_paths:
+                raise RuntimeError(
+                    f"No generated video found for feature '{video_key}'"
+                )
+            self.features[video_key]["video_info"] = get_v21_video_info(
+                video_paths[0]
+            )
 
     def _save_tasks(self):
         """保存 tasks.jsonl"""
